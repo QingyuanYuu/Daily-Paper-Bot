@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import date
 from pathlib import Path
 
 import anthropic
 
-from app.models import PaperCandidate, PaperSummary
+from app.models import PaperCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -28,90 +29,90 @@ class Summarizer:
         logger.warning("Prompt file not found: %s", path)
         return "You are a research analyst. Produce a structured paper analysis."
 
-    @staticmethod
-    def _build_user_message(paper: PaperCandidate) -> str:
-        return (
-            f"Title: {paper.title}\n"
-            f"Authors: {', '.join(paper.authors)}\n"
-            f"Abstract: {paper.abstract}\n"
-            f"Keywords matched: {', '.join(paper.matched_keywords)}\n"
-        )
+    # ── Digest: one call for ALL papers ──────────────────────────
 
-    def summarize_for_digest(self, paper: PaperCandidate) -> str:
-        """Short interpretation for the daily digest page. Returns raw markdown text."""
+    def summarize_for_digest(
+        self,
+        papers: list[PaperCandidate],
+        digest_date: date,
+        keywords: list[str],
+    ) -> str:
+        """Generate the full daily digest page markdown (one call for all papers)."""
+        user_msg = self._build_digest_user_message(papers, digest_date, keywords)
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=800,
+                max_tokens=8000,
                 system=self.digest_prompt,
-                messages=[{"role": "user", "content": self._build_user_message(paper)}],
+                messages=[{"role": "user", "content": user_msg}],
                 temperature=0.3,
             )
             return response.content[0].text
         except Exception:
-            logger.error("Digest summary failed for '%s'", paper.title, exc_info=True)
+            logger.error("Digest summary failed", exc_info=True)
             return ""
 
-    def summarize_for_note(self, paper: PaperCandidate) -> PaperSummary:
-        """Full analysis for the paper note page."""
+    # ── Note: one call per paper ─────────────────────────────────
+
+    def summarize_for_note(self, paper: PaperCandidate) -> str:
+        """Generate detailed note page markdown for a single paper."""
+        user_msg = self._build_note_user_message(paper)
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2500,
+                max_tokens=4000,
                 system=self.note_prompt,
-                messages=[{"role": "user", "content": self._build_user_message(paper)}],
+                messages=[{"role": "user", "content": user_msg}],
                 temperature=0.3,
             )
-            text = response.content[0].text
+            return response.content[0].text
         except Exception:
             logger.error("Note summary failed for '%s'", paper.title, exc_info=True)
-            return PaperSummary(tldr="Summary generation failed.")
+            return ""
 
-        return self._parse_response(text)
+    # ── User message builders ────────────────────────────────────
 
     @staticmethod
-    def _parse_response(text: str) -> PaperSummary:
-        summary = PaperSummary()
-        sections = {
-            "**TL;DR**": "tldr",
-            "**Core Idea**": "core_idea",
-            "**Method Breakdown**": "method_breakdown",
-            "**Key Takeaways**": "key_takeaways",
-            "**Limitations**": "limitations",
-            "**Robotics Takeaways**": "robotics_takeaways",
-            "**Reproduction Plan**": "reproduction_plan",
-            "**Keywords & Prerequisites**": "keywords_prerequisites",
-        }
+    def _build_digest_user_message(
+        papers: list[PaperCandidate],
+        digest_date: date,
+        keywords: list[str],
+    ) -> str:
+        lines = [
+            f"date: {digest_date.isoformat()}",
+            f"keywords_today: {', '.join(keywords)}",
+            f"papers ({len(papers)} total):",
+            "",
+        ]
+        for i, p in enumerate(papers, 1):
+            lines.append(f"--- paper {i} ---")
+            lines.append(f"title: {p.title}")
+            lines.append(f"authors: {', '.join(p.authors) if p.authors else '未提供'}")
+            lines.append(f"affiliations: 未提供")
+            lines.append(f"source: {p.source}")
+            lines.append(f"url_arxiv: {p.url if p.arxiv_id else '未提供'}")
+            lines.append(f"url_pdf: {'未提供'}")
+            lines.append(f"url_hf: {'未提供'}")
+            lines.append(f"published_date: {p.published.strftime('%Y-%m-%d') if p.published else '未提供'}")
+            lines.append(f"hf_likes: {p.hf_likes}")
+            lines.append(f"matched_tags: {', '.join(p.matched_keywords)}")
+            lines.append(f"abstract: {p.abstract or '未提供'}")
+            lines.append("")
+        return "\n".join(lines)
 
-        current_field = None
-        buffer: list[str] = []
-
-        for line in text.split("\n"):
-            matched_section = False
-            for header, field_name in sections.items():
-                if line.strip().startswith(header):
-                    if current_field:
-                        _set_field(summary, current_field, buffer)
-                    current_field = field_name
-                    buffer = []
-                    rest = line.strip()[len(header):].strip()
-                    if rest:
-                        buffer.append(rest)
-                    matched_section = True
-                    break
-            if not matched_section and current_field:
-                buffer.append(line)
-
-        if current_field:
-            _set_field(summary, current_field, buffer)
-
-        return summary
-
-
-def _set_field(summary: PaperSummary, field_name: str, lines: list[str]) -> None:
-    text = "\n".join(lines).strip()
-    if field_name == "key_takeaways":
-        bullets = [l.lstrip("- ").strip() for l in text.split("\n") if l.strip().startswith("-")]
-        summary.key_takeaways = bullets
-    else:
-        setattr(summary, field_name, text)
+    @staticmethod
+    def _build_note_user_message(paper: PaperCandidate) -> str:
+        lines = [
+            f"title: {paper.title}",
+            f"authors: {', '.join(paper.authors) if paper.authors else '未提供'}",
+            f"affiliations: 未提供",
+            f"source: {paper.source}",
+            f"url_arxiv: {paper.url if paper.arxiv_id else '未提供'}",
+            f"url_pdf: 未提供",
+            f"url_hf: 未提供",
+            f"published_date: {paper.published.strftime('%Y-%m-%d') if paper.published else '未提供'}",
+            f"hf_likes: {paper.hf_likes}",
+            f"matched_tags: {', '.join(paper.matched_keywords)}",
+            f"abstract: {paper.abstract or '未提供'}",
+        ]
+        return "\n".join(lines)

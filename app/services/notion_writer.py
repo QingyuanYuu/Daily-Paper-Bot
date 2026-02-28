@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date
 
 from notion_client import Client
@@ -19,16 +20,23 @@ class NotionWriter:
 
     # ── Public API ──────────────────────────────────────────────
 
-    def write_digest(self, papers: list[PaperCandidate], digest_date: date) -> str:
-        """Upsert today's digest page and create paper note pages. Returns digest page id."""
+    def write_digest(
+        self,
+        papers: list[PaperCandidate],
+        digest_date: date,
+        digest_markdown: str,
+    ) -> str:
+        """Upsert today's digest page and paper note pages. Returns digest page id."""
         digest_page_id = self._upsert_digest_page(digest_date)
-        note_page_ids: list[tuple[PaperCandidate, str]] = []
 
+        # Create/update paper note pages first so we have their IDs
+        note_map: dict[str, str] = {}  # dedup_key -> note_page_id
         for paper in papers:
             note_id = self._upsert_paper_note(paper)
-            note_page_ids.append((paper, note_id))
+            note_map[paper.dedup_key] = note_id
 
-        body_blocks = self._build_digest_body(papers, note_page_ids)
+        # Build digest body: convert markdown to blocks, then inject note links
+        body_blocks = self._build_digest_body(digest_markdown, papers, note_map)
         self._replace_page_body(digest_page_id, body_blocks)
 
         logger.info("Wrote digest for %s with %d papers", digest_date, len(papers))
@@ -39,7 +47,6 @@ class NotionWriter:
     def _upsert_digest_page(self, digest_date: date) -> str:
         title = f"Daily Digest – {digest_date.isoformat()}"
 
-        # Search existing children of the parent page for today's digest
         existing_id = self._find_child_page_by_title(self.digest_parent_page, title)
         if existing_id:
             logger.info("Found existing digest page: %s", existing_id)
@@ -55,7 +62,6 @@ class NotionWriter:
         return page["id"]
 
     def _find_child_page_by_title(self, parent_page_id: str, title: str) -> str | None:
-        """Search children of a page for a child_page with matching title."""
         try:
             resp = self.client.blocks.children.list(block_id=parent_page_id, page_size=100)
             for block in resp["results"]:
@@ -72,7 +78,7 @@ class NotionWriter:
         existing_id = self._find_paper_note_by_key(key)
 
         properties: dict = {
-            "Name": {"title": [{"text": {"content": paper.title[:100]}}]},
+            "Title": {"title": [{"text": {"content": paper.title[:100]}}]},
             "URL": {"url": paper.url},
             "Key": {"rich_text": [{"text": {"content": key}}]},
         }
@@ -80,24 +86,32 @@ class NotionWriter:
             properties["ArXiv ID"] = {
                 "rich_text": [{"text": {"content": paper.arxiv_id}}]
             }
+        if paper.matched_keywords:
+            properties["Tags"] = {
+                "multi_select": [{"name": kw} for kw in paper.matched_keywords]
+            }
+        if paper.published:
+            properties["Date Created"] = {
+                "date": {"start": paper.published.strftime("%Y-%m-%d")}
+            }
+
+        note_blocks = self._build_note_body(paper)
 
         if existing_id:
             logger.info("Updating existing paper note for '%s'", paper.title[:50])
             self.client.pages.update(page_id=existing_id, properties=properties)
-            self._replace_page_body(existing_id, self._build_note_body(paper))
+            self._replace_page_body(existing_id, note_blocks)
             return existing_id
 
-        # Create new page
         page = self.client.pages.create(
             parent={"database_id": self.notes_db},
             properties=properties,
-            children=self._build_note_body(paper),
+            children=note_blocks,
         )
         logger.info("Created paper note for '%s' (Key=%s)", paper.title[:50], key)
         return page["id"]
 
     def _find_paper_note_by_key(self, key: str) -> str | None:
-        """Find existing paper note by Key property."""
         try:
             resp = self._query_database(
                 self.notes_db,
@@ -111,7 +125,6 @@ class NotionWriter:
         return None
 
     def _query_database(self, database_id: str, **kwargs) -> dict:
-        """Query a database (compatible with notion-client v3)."""
         body = {k: v for k, v in kwargs.items()}
         return self.client.request(
             path=f"databases/{database_id}/query",
@@ -123,99 +136,89 @@ class NotionWriter:
 
     def _build_digest_body(
         self,
+        digest_markdown: str,
         papers: list[PaperCandidate],
-        note_page_ids: list[tuple[PaperCandidate, str]],
+        note_map: dict[str, str],
     ) -> list[dict]:
-        blocks: list[dict] = []
-        note_map = {p.dedup_key: nid for p, nid in note_page_ids}
+        """Convert digest markdown to Notion blocks, injecting note links after each paper section."""
+        blocks = _markdown_to_blocks(digest_markdown)
 
-        for i, paper in enumerate(papers, 1):
-            tags = ", ".join(paper.matched_keywords)
-            meta = f"(arXiv:{paper.arxiv_id or 'N/A'} | ❤️ {paper.hf_likes} | tags: {tags})"
+        # Insert "📄 Detailed Note" links after each paper's section.
+        # The digest prompt outputs "### {i}. {title}" for each paper.
+        # We find these headings and insert the mention link right after the last block
+        # before the next paper heading (or end).
+        paper_heading_indices = []
+        for idx, block in enumerate(blocks):
+            btype = block.get("type", "")
+            if btype == "heading_3":
+                text = _extract_block_text(block)
+                # Match "1. Title", "2. Title", etc.
+                if re.match(r"^\d+\.\s+", text):
+                    paper_heading_indices.append(idx)
 
-            # a) Heading with link + meta
-            blocks.append(_heading2(f"{i}. {paper.title}"))
-            blocks.append(_link_text(paper.title, paper.url))
-            blocks.append(_paragraph(meta))
+        # Build a map from paper index (1-based) to note_page_id
+        paper_note_ids = []
+        for p in papers:
+            paper_note_ids.append(note_map.get(p.dedup_key, ""))
 
-            # b) Abstract
-            blocks.append(_heading3("Abstract:"))
-            blocks.append(_paragraph(paper.abstract or "No abstract available."))
+        # Insert mention blocks in reverse order so indices stay valid
+        for section_idx in range(len(paper_heading_indices) - 1, -1, -1):
+            if section_idx >= len(paper_note_ids):
+                continue
+            note_id = paper_note_ids[section_idx]
+            if not note_id:
+                continue
 
-            # c) Interpretation (skipped when summary is None)
-            if paper.summary:
-                blocks.append(_heading3("Interpretation:"))
-                blocks.append(_paragraph(paper.summary.tldr))
-                if paper.summary.core_idea:
-                    blocks.append(_paragraph(paper.summary.core_idea))
-                if paper.summary.method_breakdown:
-                    blocks.append(_paragraph(paper.summary.method_breakdown))
+            # Find insertion point: just before the next paper heading, or end of blocks
+            if section_idx + 1 < len(paper_heading_indices):
+                insert_at = paper_heading_indices[section_idx + 1]
+            else:
+                insert_at = len(blocks)
 
-            # d) Key points (skipped when summary is None)
-            if paper.summary and paper.summary.key_takeaways:
-                blocks.append(_heading3("Key points:"))
-                for point in paper.summary.key_takeaways:
-                    blocks.append(_bulleted_list_item(point))
-
-            # e) Link to detailed note
-            note_id = note_map.get(paper.dedup_key, "")
-            if note_id:
-                blocks.append(
-                    _paragraph_with_mention("📄 Detailed Note", note_id)
-                )
-
-            # Divider between papers
-            blocks.append(_divider())
+            # Insert divider + mention link
+            mention_block = _paragraph_with_mention("📄 Detailed Note", note_id)
+            divider_block = _divider()
+            blocks.insert(insert_at, divider_block)
+            blocks.insert(insert_at, mention_block)
 
         return blocks
 
     def _build_note_body(self, paper: PaperCandidate) -> list[dict]:
-        blocks: list[dict] = []
-        blocks.append(_heading2(paper.title))
-        blocks.append(_link_text(paper.title, paper.url))
-        if paper.arxiv_id:
-            blocks.append(_paragraph(f"arXiv ID: {paper.arxiv_id}"))
-        blocks.append(_paragraph(f"Authors: {', '.join(paper.authors)}"))
-        blocks.append(_paragraph(f"❤️ HF Likes: {paper.hf_likes}"))
-        blocks.append(_divider())
+        """Convert paper note markdown to Notion blocks."""
+        if paper.note_markdown:
+            return _markdown_to_blocks(paper.note_markdown)
 
-        # Abstract
-        blocks.append(_heading3("Abstract"))
-        blocks.append(_paragraph(paper.abstract or "No abstract available."))
-
-        # Summary sections (skipped when summary is None)
-        if paper.summary:
-            s = paper.summary
-            for label, content in [
-                ("TL;DR", s.tldr),
-                ("Core Idea", s.core_idea),
-                ("Method Breakdown", s.method_breakdown),
-                ("Limitations", s.limitations),
-                ("Robotics Takeaways", s.robotics_takeaways),
-                ("Reproduction Plan", s.reproduction_plan),
-                ("Keywords & Prerequisites", s.keywords_prerequisites),
-            ]:
-                if content:
-                    blocks.append(_heading3(label))
-                    blocks.append(_paragraph(content))
-
-            if s.key_takeaways:
-                blocks.append(_heading3("Key Takeaways"))
-                for point in s.key_takeaways:
-                    blocks.append(_bulleted_list_item(point))
-
-        return blocks
+        # Fallback: just show abstract if no note markdown
+        return [
+            _heading2(paper.title),
+            _paragraph(f"Authors: {', '.join(paper.authors)}"),
+            _divider(),
+            _heading3("Abstract"),
+            _paragraph(paper.abstract or "No abstract available."),
+        ]
 
     # ── Helpers ──────────────────────────────────────────────────
 
     def _replace_page_body(self, page_id: str, blocks: list[dict]) -> None:
-        # Delete existing children
-        existing = self.client.blocks.children.list(block_id=page_id)
-        for block in existing["results"]:
+        # Paginate to collect ALL existing block IDs before deleting
+        block_ids: list[str] = []
+        cursor = None
+        while True:
+            kwargs: dict = {"block_id": page_id, "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            resp = self.client.blocks.children.list(**kwargs)
+            block_ids.extend(b["id"] for b in resp["results"])
+            if not resp.get("has_more"):
+                break
+            cursor = resp.get("next_cursor")
+
+        for bid in block_ids:
             try:
-                self.client.blocks.delete(block_id=block["id"])
+                self.client.blocks.delete(block_id=bid)
             except Exception:
                 pass
+
         # Append new blocks (Notion limit: 100 per request)
         for i in range(0, len(blocks), 100):
             self.client.blocks.children.append(
@@ -223,12 +226,120 @@ class NotionWriter:
             )
 
 
+# ── Markdown → Notion blocks converter ─────────────────────────
+
+def _markdown_to_blocks(md_text: str) -> list[dict]:
+    """Convert markdown text to a list of Notion API block objects.
+
+    Handles: # h1, ## h2, ### / #### h3, - bullets, --- dividers,
+    **bold** inline, `code` inline, and plain paragraphs.
+    """
+    blocks: list[dict] = []
+    lines = md_text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Skip empty lines
+        if not stripped:
+            i += 1
+            continue
+
+        # Divider: --- or *** or ___
+        if re.match(r"^[-*_]{3,}\s*$", stripped):
+            blocks.append(_divider())
+            i += 1
+            continue
+
+        # Headings
+        heading_match = re.match(r"^(#{1,4})\s+(.+)$", stripped)
+        if heading_match:
+            level = len(heading_match.group(1))
+            text = heading_match.group(2).strip()
+            if level == 1:
+                blocks.append(_heading1(text))
+            elif level == 2:
+                blocks.append(_heading2(text))
+            else:  # 3 or 4 → heading_3
+                blocks.append(_heading3(text))
+            i += 1
+            continue
+
+        # Bulleted list item: - text or * text
+        bullet_match = re.match(r"^[-*]\s+(.+)$", stripped)
+        if bullet_match:
+            text = bullet_match.group(1)
+            blocks.append(_bulleted_list_item(text))
+            i += 1
+            continue
+
+        # Default: paragraph (accumulate consecutive non-special lines)
+        para_lines = [stripped]
+        i += 1
+        while i < len(lines):
+            next_stripped = lines[i].strip()
+            if not next_stripped:
+                break
+            if re.match(r"^(#{1,4})\s+", next_stripped):
+                break
+            if re.match(r"^[-*_]{3,}\s*$", next_stripped):
+                break
+            if re.match(r"^[-*]\s+", next_stripped):
+                break
+            para_lines.append(next_stripped)
+            i += 1
+
+        blocks.append(_paragraph_rich("\n".join(para_lines)))
+
+    return blocks
+
+
 # ── Block helpers ────────────────────────────────────────────────
 
 def _rich_text(content: str) -> list[dict]:
-    # Notion blocks have a 2000-char limit per rich_text element
+    """Plain rich_text, chunked to 2000 chars per element."""
     chunks = [content[i : i + 2000] for i in range(0, max(len(content), 1), 2000)]
     return [{"type": "text", "text": {"content": c}} for c in chunks]
+
+
+def _rich_text_with_formatting(text: str) -> list[dict]:
+    """Parse inline **bold** and `code` into Notion rich_text annotations."""
+    parts: list[dict] = []
+    # Split by **bold** and `code` patterns
+    pattern = r"(\*\*[^*]+\*\*|`[^`]+`)"
+    segments = re.split(pattern, text)
+    for seg in segments:
+        if not seg:
+            continue
+        if seg.startswith("**") and seg.endswith("**"):
+            inner = seg[2:-2]
+            for chunk in _chunked(inner, 2000):
+                parts.append({
+                    "type": "text",
+                    "text": {"content": chunk},
+                    "annotations": {"bold": True},
+                })
+        elif seg.startswith("`") and seg.endswith("`"):
+            inner = seg[1:-1]
+            for chunk in _chunked(inner, 2000):
+                parts.append({
+                    "type": "text",
+                    "text": {"content": chunk},
+                    "annotations": {"code": True},
+                })
+        else:
+            for chunk in _chunked(seg, 2000):
+                parts.append({"type": "text", "text": {"content": chunk}})
+    return parts if parts else [{"type": "text", "text": {"content": " "}}]
+
+
+def _chunked(s: str, size: int) -> list[str]:
+    return [s[i : i + size] for i in range(0, max(len(s), 1), size)]
+
+
+def _heading1(text: str) -> dict:
+    return {"object": "block", "type": "heading_1", "heading_1": {"rich_text": _rich_text(text)}}
 
 
 def _heading2(text: str) -> dict:
@@ -243,21 +354,16 @@ def _paragraph(text: str) -> dict:
     return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": _rich_text(text)}}
 
 
-def _link_text(text: str, url: str) -> dict:
-    return {
-        "object": "block",
-        "type": "paragraph",
-        "paragraph": {
-            "rich_text": [{"type": "text", "text": {"content": text, "link": {"url": url}}}]
-        },
-    }
+def _paragraph_rich(text: str) -> dict:
+    """Paragraph with inline bold/code formatting."""
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": _rich_text_with_formatting(text)}}
 
 
 def _bulleted_list_item(text: str) -> dict:
     return {
         "object": "block",
         "type": "bulleted_list_item",
-        "bulleted_list_item": {"rich_text": _rich_text(text)},
+        "bulleted_list_item": {"rich_text": _rich_text_with_formatting(text)},
     }
 
 
@@ -276,3 +382,10 @@ def _paragraph_with_mention(text: str, page_id: str) -> dict:
             ]
         },
     }
+
+
+def _extract_block_text(block: dict) -> str:
+    """Extract plain text from a block's rich_text array."""
+    btype = block.get("type", "")
+    rt = block.get(btype, {}).get("rich_text", [])
+    return "".join(item.get("text", {}).get("content", "") for item in rt)

@@ -22,8 +22,7 @@ class PaperCandidate:
 
     # populated after ranking
     score: float = 0.0
-    summary: Optional[PaperSummary] = None
-    digest_interpretation: str = ""
+    note_markdown: str = ""
 
     @property
     def dedup_key(self) -> str:
@@ -58,13 +57,3 @@ class PaperCandidate:
         return title
 
 
-@dataclass
-class PaperSummary:
-    tldr: str = ""
-    core_idea: str = ""
-    method_breakdown: str = ""
-    key_takeaways: list[str] = field(default_factory=list)
-    limitations: str = ""
-    robotics_takeaways: str = ""
-    reproduction_plan: str = ""
-    keywords_prerequisites: str = ""

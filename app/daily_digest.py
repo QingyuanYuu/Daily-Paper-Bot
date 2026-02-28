@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from datetime import date
 
 from app.config import load_config
@@ -62,32 +61,41 @@ def main(argv: list[str] | None = None) -> None:
     for i, p in enumerate(top_papers, 1):
         logger.info("  %d. [%.3f] %s", i, p.score, p.title)
 
-    # 4) Summarize each paper (Claude API)
+    # 4) Summarize with Claude API
     summarizer = Summarizer()
+
+    # 4a) Digest: one call for all papers
+    logger.info("Generating digest summary for %d papers...", len(top_papers))
+    digest_markdown = summarizer.summarize_for_digest(top_papers, digest_date, keywords)
+
+    # 4b) Note: one call per paper
     for p in top_papers:
-        logger.info("Summarizing: %s", p.title[:60])
-        p.digest_interpretation = summarizer.summarize_for_digest(p)
-        p.summary = summarizer.summarize_for_note(p)
+        logger.info("Generating note for: %s", p.title[:60])
+        p.note_markdown = summarizer.summarize_for_note(p)
 
     # 5) Write to Notion
     if args.dry_run:
         logger.info("Dry run — skipping Notion write.")
-        _print_digest(top_papers)
+        _print_digest(digest_markdown, top_papers)
         return
 
     writer = NotionWriter()
-    digest_id = writer.write_digest(top_papers, digest_date)
+    digest_id = writer.write_digest(top_papers, digest_date, digest_markdown)
     logger.info("Notion digest page: %s", digest_id)
 
 
-def _print_digest(papers: list) -> None:
+def _print_digest(digest_markdown: str, papers: list) -> None:
+    print("\n" + "=" * 60)
+    print("DIGEST MARKDOWN:")
+    print("=" * 60)
+    print(digest_markdown[:2000] if digest_markdown else "(empty)")
+    print("\n" + "=" * 60)
     for i, p in enumerate(papers, 1):
         print(f"\n{'='*60}")
         print(f"{i}. {p.title}")
-        print(f"   arXiv: {p.arxiv_id} | ❤️ {p.hf_likes} | score: {p.score:.3f}")
-        print(f"   URL: {p.url}")
-        if p.summary:
-            print(f"   TL;DR: {p.summary.tldr}")
+        print(f"   arXiv: {p.arxiv_id} | HF likes: {p.hf_likes} | score: {p.score:.3f}")
+        if p.note_markdown:
+            print(f"   Note preview: {p.note_markdown[:200]}...")
 
 
 if __name__ == "__main__":
