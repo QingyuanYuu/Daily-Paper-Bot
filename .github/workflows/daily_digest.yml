@@ -1,0 +1,45 @@
+name: Daily Paper Digest
+
+on:
+  schedule:
+    # 09:00 America/Los_Angeles = 17:00 UTC (PST) or 16:00 UTC (PDT)
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Digest date (YYYY-MM-DD)"
+        required: false
+      top_k:
+        description: "Number of top papers"
+        required: false
+        default: "5"
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily digest
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          DIGEST_PARENT_PAGE_ID: ${{ secrets.DIGEST_PARENT_PAGE_ID }}
+          NOTES_DB_ID: ${{ secrets.NOTES_DB_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          DATE_ARG=""
+          TOP_K_ARG=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            DATE_ARG="--date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.top_k }}" ]; then
+            TOP_K_ARG="--top_k ${{ github.event.inputs.top_k }}"
+          fi
+          python -m app.daily_digest $DATE_ARG $TOP_K_ARG

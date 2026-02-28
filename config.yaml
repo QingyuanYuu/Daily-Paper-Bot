@@ -1,0 +1,19 @@
+keywords:
+  - humanoid
+  - world model
+  - diffusion
+  - dexterous manipulation
+
+providers:
+  arxiv:
+    window_days: 7
+    max_results_per_keyword: 50
+  huggingface:
+    trending_url: "https://huggingface.co/papers"
+
+ranking:
+  top_k: 5
+  weights:
+    hf_likes: 0.6
+    recency: 0.3
+    keyword_match: 0.1
