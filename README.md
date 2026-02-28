@@ -1,100 +1,101 @@
 # Daily Paper Bot
 
-每天自动从 **arXiv** 和 **Hugging Face** 抓取与你的研究方向相关的论文，通过社区热度 + 时效性 + 关键词匹配进行排名，使用 **Claude** 生成中英混合的结构化摘要，最终写入 **Notion** 形成可长期沉淀的知识库。
+Automated daily paper digest that fetches papers from **arXiv** and **Hugging Face**, ranks them by community engagement + recency + keyword relevance, generates structured summaries with **Claude**, and writes everything to **Notion** as a long-term knowledge base.
 
-> 默认配置面向 **机器人 / 具身智能** 方向（humanoid、world model、diffusion、dexterous manipulation），但你可以通过修改关键词将它适配到任何研究领域。
+> The default configuration targets **robotics / embodied AI** research (humanoid, world model, diffusion, dexterous manipulation), but you can adapt it to any research area by changing the keywords.
 
-## Pipeline 总览
+## Pipeline Overview
 
 ```
 ┌──────────────┐     ┌──────────────┐
-│   arXiv API  │     │ HF Daily     │
-│  (按关键词搜索) │     │ Papers API   │
-│  最近 7 天     │     │ + HTML 爬虫   │
+│   arXiv API  │     │  HF Daily    │
+│  (keyword    │     │  Papers API  │
+│   search,    │     │  + HTML      │
+│   last 7d)   │     │  scraper)    │
 └──────┬───────┘     └──────┬───────┘
        │                    │
        └────────┬───────────┘
                 ▼
        ┌────────────────┐
-       │  Merge & Dedupe │  按 arXiv ID 去重（fallback: 标题哈希）
-       │  合并 HF likes   │  补全缺失的 abstract / authors / 日期
+       │  Merge & Dedupe │  Dedup by arXiv ID (fallback: title hash)
+       │                │  Merge HF likes, fill missing metadata
        └────────┬───────┘
                 ▼
        ┌────────────────┐
        │     Rank       │  score = 0.6·log(1+likes)
-       │   打分 & 排序    │       + 0.3·recency_bonus
-       │   取 Top-K      │       + 0.1·keyword_match
+       │                │       + 0.3·recency_bonus
+       │                │       + 0.1·keyword_match
        └────────┬───────┘
                 ▼
        ┌────────────────┐
-       │   Summarize    │  Claude 生成两种摘要：
-       │   (Claude API)  │  · Digest 短摘要（今日锐评 + 要点速览）
-       │                │  · Note 详细笔记（方法详解 + 复现计划）
+       │   Summarize    │  Claude generates two summaries:
+       │   (Claude API) │  · Digest (quick overview + key insights)
+       │                │  · Note (method breakdown + repro plan)
        └────────┬───────┘
                 ▼
        ┌────────────────┐
-       │  Notion Writer │  · 创建/更新 Daily Digest 页面
-       │                │  · 创建/更新 Paper Note 页面
-       │                │  · 自动关联（Digest ↔ Note）
+       │  Notion Writer │  · Upsert Daily Digest page
+       │                │  · Upsert Paper Note pages
+       │                │  · Cross-link Digest ↔ Notes
        └────────────────┘
 ```
 
-## 各阶段详解
+## How Each Stage Works
 
-### 1. Fetch — 论文抓取
+### 1. Fetch
 
-**arXiv**：对每个关键词构造 `all:"keyword"` 查询，搜索最近 N 天（默认 7 天）的论文，按提交日期倒序，每个关键词最多返回 50 篇。一篇论文如果同时命中多个关键词（例如同时包含 "humanoid" 和 "world model"），会被多次搜到，后续合并阶段会将它们合为一条并保留所有匹配到的关键词标签。
+**arXiv**: For each keyword, constructs an `all:"keyword"` query against the arXiv API, searching the last N days (default: 7) sorted by submission date. Up to 50 results per keyword. A paper matching multiple keywords (e.g., both "humanoid" and "world model") will be fetched multiple times and merged in the next stage with all matched keyword tags preserved.
 
-**Hugging Face**：调用 HF Daily Papers JSON API 获取当天全部热门论文（包含 likes 数），在标题 + 摘要中进行关键词子串匹配，筛选出相关论文。如果 API 失败，自动 fallback 到 HTML 页面爬虫。
+**Hugging Face**: Calls the HF Daily Papers JSON API to retrieve all trending papers (including like counts), then filters by substring-matching keywords against title + abstract (case-insensitive). Automatically falls back to HTML scraping if the API is unavailable.
 
-### 2. Merge & Dedupe — 合并去重
+### 2. Merge & Dedupe
 
-将两个来源的论文合并为一份列表：
-- **去重键**：优先用 arXiv ID（如 `2401.12345`），没有 arXiv ID 时用标题规范化后的哈希值
-- **合并策略**：HF likes 取最大值；matched_keywords 做并集；缺失的 abstract、authors、published 日期从另一来源补全
+Combines papers from both sources into a single list:
+- **Dedup key**: arXiv ID (e.g., `2401.12345`) takes priority; falls back to a normalized title hash when no arXiv ID is available
+- **Merge strategy**: Takes the max HF likes; unions matched keywords; fills in missing abstract, authors, and published date from the other source
 
-### 3. Rank — 打分排名
+### 3. Rank
 
-每篇论文的综合得分：
+Each paper receives a composite score:
 
 ```
-score = 0.6 × log(1 + hf_likes)      # 社区热度（对数衰减，避免极端值主导）
-      + 0.3 × recency_bonus           # 时效性（今天=1.0，7天前=0.0，线性衰减）
-      + 0.1 × keyword_match_strength  # 关键词匹配度（匹配数 / 总关键词数）
+score = 0.6 × log(1 + hf_likes)      # Community engagement (log-scaled to prevent outlier dominance)
+      + 0.3 × recency_bonus           # Recency (1.0 for today, linear decay to 0.0 at 7 days)
+      + 0.1 × keyword_match_strength  # Keyword coverage (matched keywords / total keywords)
 ```
 
-按得分降序取前 `top_k` 篇（默认 5，可通过 `.env` 中的 `TOP_K` 覆盖）。
+Papers are sorted by score in descending order, and the top `top_k` are selected (default: 5, overridable via `TOP_K` in `.env`).
 
-**关于多关键词匹配**：一篇论文可以同时匹配多个关键词。例如一篇涉及 humanoid + diffusion 的论文，`keyword_match_strength = 2/4 = 0.5`，比只匹配一个的论文（0.25）得分更高。实际效果中 HF likes 占主导地位，关键词匹配作为辅助信号。
+**Multi-keyword matching**: A single paper can match multiple keywords. For example, a paper about humanoid + diffusion gets `keyword_match_strength = 2/4 = 0.5`, scoring higher than one matching only a single keyword (0.25). In practice, HF likes dominate the ranking; keyword match serves as a tiebreaker.
 
-### 4. Summarize — Claude 结构化摘要
+### 4. Summarize
 
-对每篇入选论文，调用 Claude API 生成两种摘要（中英混合输出）：
+For each selected paper, Claude generates two structured summaries:
 
-| 类型 | Prompt | 用途 | 内容 |
-|------|--------|------|------|
-| **Digest 摘要** | `skills/digest_prompt.md` | Daily Digest 页面 | 今日锐评、要点速览、每篇论文的问题设定 / 创新点 / 核心方法 / 机器人启示 / 风险局限 / 复现建议 |
-| **Note 笔记** | `skills/note_prompt.md` | Paper Note 独立页面 | 一句话结论、方法详解（Pipeline / 表征结构 / 训练目标 / 推理流程 / 关键设计选择）、创新点、局限、复现计划（~1000字） |
+| Type | Prompt File | Used In | Content |
+|------|-------------|---------|---------|
+| **Digest** | `skills/digest_prompt.md` | Daily Digest page | Daily commentary, key takeaways, per-paper problem/method/innovation/limitations/repro suggestions |
+| **Note** | `skills/note_prompt.md` | Paper Note page | One-line conclusion, detailed method breakdown (pipeline / architecture / training / inference / key design choices), innovations, limitations, reproduction plan (~1000 words) |
 
-两个 prompt 文件可自行编辑定制。
+Both prompt files are fully customizable.
 
-### 5. Write to Notion — 写入 Notion
+### 5. Write to Notion
 
-- **Daily Digest 页面**：在指定的父页面下创建当天的子页面（标题格式：`Daily Digest – 2026-02-28`），包含所有入选论文的概览、摘要和到详细笔记的链接
-- **Paper Note 页面**：在指定的数据库中为每篇论文创建独立页面，包含完整的结构化笔记
-- **幂等写入**：通过 Key 字段（arXiv ID 或标题哈希）去重，重复运行不会产生重复页面，而是更新已有页面
+- **Daily Digest page**: Created as a child page under a designated parent page (title format: `Daily Digest – 2026-02-28`), containing an overview of all selected papers with summaries and links to detailed notes
+- **Paper Note pages**: Created in a designated database, one per paper, with the full structured analysis
+- **Idempotent writes**: Uses a Key field (arXiv ID or title hash) for deduplication — re-running won't create duplicates, it updates existing pages
 
 ---
 
-## 快速上手
+## Getting Started
 
-### 前置条件
+### Prerequisites
 
 - Python 3.11+
-- 一个 [Notion](https://www.notion.so) 账号
-- 一个 [Anthropic](https://console.anthropic.com) API Key
+- A [Notion](https://www.notion.so) account
+- An [Anthropic](https://console.anthropic.com) API key
 
-### 第一步：克隆 & 安装
+### Step 1: Clone & Install
 
 ```bash
 git clone https://github.com/QingyuanYuu/Daily-Paper-Bot.git
@@ -102,85 +103,85 @@ cd Daily-Paper-Bot
 pip install -r requirements.txt
 ```
 
-### 第二步：配置 Notion
+### Step 2: Set Up Notion
 
-1. **创建 Notion Integration**
-   - 前往 [My Integrations](https://www.notion.so/my-integrations)，点击 "New integration"
-   - 起个名字（如 "Paper Bot"），选择你的 workspace，点击 "Submit"
-   - 复制生成的 **Internal Integration Token**（以 `ntn_` 或 `secret_` 开头）
+1. **Create a Notion Integration**
+   - Go to [My Integrations](https://www.notion.so/my-integrations) and click "New integration"
+   - Give it a name (e.g., "Paper Bot"), select your workspace, and click "Submit"
+   - Copy the **Internal Integration Token** (starts with `ntn_` or `secret_`)
 
-2. **创建 Digest 父页面**
-   - 在 Notion 中新建一个页面，作为所有 Daily Digest 的"总目录"（例如取名 "Daily Digests"）
-   - 点击页面右上角 `···` → "Connections" → 添加你刚创建的 integration
-   - 获取页面 ID：点击 "Share" → "Copy link"，URL 中最后的 32 位十六进制字符串就是 ID
+2. **Create the Digest Parent Page**
+   - Create a new page in Notion to serve as the parent for all daily digests (e.g., "Daily Digests")
+   - Click `···` in the top right → "Connections" → add the integration you just created
+   - Get the page ID: click "Share" → "Copy link" — the 32-character hex string at the end of the URL is the ID
      ```
-     https://www.notion.so/Your-Page-Title-{这里就是32位ID}
-     ```
-
-3. **创建 Paper Notes 数据库**
-   - 新建一个 **Full Page Database**（完整页面数据库）
-   - 添加以下属性（Properties）：
-
-     | 属性名 | 类型 | 说明 |
-     |--------|------|------|
-     | `Name` | Title | 论文标题（自带的） |
-     | `URL` | URL | 论文链接 |
-     | `Key` | Rich text | 去重键（系统自动填写） |
-     | `ArXiv ID` | Rich text | arXiv 编号 |
-
-   - 同样将 integration 连接到此数据库
-   - 获取数据库 ID：打开数据库页面，"Share" → "Copy link"，URL 中 `?v=` 之前的 32 位十六进制串
-     ```
-     https://www.notion.so/{这里是32位DB_ID}?v=...
+     https://www.notion.so/Your-Page-Title-{32-char-ID-here}
      ```
 
-### 第三步：配置环境变量
+3. **Create the Paper Notes Database**
+   - Create a new **Full Page Database**
+   - Add the following properties:
+
+     | Property | Type | Description |
+     |----------|------|-------------|
+     | `Name` | Title | Paper title (built-in) |
+     | `URL` | URL | Link to paper |
+     | `Key` | Rich text | Dedup key (auto-filled by the bot) |
+     | `ArXiv ID` | Rich text | arXiv identifier |
+
+   - Connect the integration to this database as well
+   - Get the database ID: open the database, "Share" → "Copy link" — the 32-char hex string before `?v=` is the ID
+     ```
+     https://www.notion.so/{32-char-DB-ID-here}?v=...
+     ```
+
+### Step 3: Configure Environment Variables
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env` 文件，填入你的实际值：
+Edit `.env` with your actual values:
 
 ```env
-# 必填
-NOTION_API_KEY=ntn_你的integration_token
-DIGEST_PARENT_PAGE_ID=你的digest父页面ID
-NOTES_DB_ID=你的paper_notes数据库ID
-ANTHROPIC_API_KEY=sk-ant-你的anthropic_key
+# Required
+NOTION_API_KEY=ntn_your_integration_token
+DIGEST_PARENT_PAGE_ID=your_digest_parent_page_id
+NOTES_DB_ID=your_paper_notes_database_id
+ANTHROPIC_API_KEY=sk-ant-your_anthropic_key
 
-# 选填 — 覆盖 config.yaml 中的默认值
-# TOP_K=3                  # 每天选几篇论文（默认 5）
-# WINDOW_DAYS=7             # arXiv 搜索最近几天（默认 7）
-# KEYWORDS=humanoid,world model,diffusion   # 自定义关键词（逗号分隔）
-# TZ=America/Los_Angeles    # 时区
+# Optional — override config.yaml defaults
+# TOP_K=3                  # Number of top papers per day (default: 5)
+# WINDOW_DAYS=7             # arXiv search window in days (default: 7)
+# KEYWORDS=humanoid,world model,diffusion   # Custom keywords (comma-separated)
+# TZ=America/Los_Angeles    # Timezone
 ```
 
-### 第四步：运行
+### Step 4: Run
 
 ```bash
-# 正常运行（抓取 → 排名 → 摘要 → 写入 Notion）
+# Full run (fetch → rank → summarize → write to Notion)
 python -m app.daily_digest
 
-# 先试一下 dry run（只打印到终端，不写 Notion）
+# Dry run (prints results to console, skips Notion)
 python -m app.daily_digest --dry-run
 
-# 指定日期和论文数
+# Specify date and number of papers
 python -m app.daily_digest --date 2026-02-27 --top_k 5
 ```
 
 ---
 
-## 自定义关键词
+## Customizing Keywords
 
-关键词决定了你能收到哪些论文。修改方式（二选一）：
+Keywords determine which papers you receive. Two ways to change them:
 
-**方式 A**：编辑 `.env`（推荐，环境变量优先级最高）
+**Option A**: Edit `.env` (recommended — env vars take highest priority)
 ```env
 KEYWORDS=reinforcement learning,transformer,LLM agent
 ```
 
-**方式 B**：编辑 `config.yaml`
+**Option B**: Edit `config.yaml`
 ```yaml
 keywords:
   - reinforcement learning
@@ -188,27 +189,27 @@ keywords:
   - LLM agent
 ```
 
-**关键词工作方式**：
-- arXiv 对每个关键词做短语搜索（`all:"keyword"`），所以 `world model` 会精确匹配这个短语
-- HF 在标题 + 摘要中做子串匹配（大小写不敏感）
-- 一篇论文可以匹配多个关键词，匹配越多得分越高
+**How keywords work**:
+- arXiv uses exact phrase search (`all:"keyword"`), so `world model` matches that exact phrase
+- HF uses case-insensitive substring matching against title + abstract
+- A paper can match multiple keywords — more matches = higher score
 
 ---
 
-## 调整排名权重
+## Tuning Ranking Weights
 
-编辑 `config.yaml` 中的 `ranking.weights`：
+Edit the `ranking.weights` section in `config.yaml`:
 
 ```yaml
 ranking:
   top_k: 5
   weights:
-    hf_likes: 0.6       # 社区热度权重
-    recency: 0.3         # 时效性权重
-    keyword_match: 0.1   # 关键词匹配权重
+    hf_likes: 0.6       # Community engagement weight
+    recency: 0.3         # Recency weight
+    keyword_match: 0.1   # Keyword coverage weight
 ```
 
-例如，如果你更看重最新论文而非热门论文：
+For example, to prioritize the latest papers over popular ones:
 ```yaml
   weights:
     hf_likes: 0.3
@@ -218,98 +219,98 @@ ranking:
 
 ---
 
-## 定制摘要 Prompt
+## Customizing Summary Prompts
 
-两个 prompt 文件控制 Claude 的输出格式和内容：
+Two prompt files control Claude's output format and content:
 
-- `skills/digest_prompt.md` — Daily Digest 页面的摘要风格（今日锐评、要点速览、每篇论文概述）
-- `skills/note_prompt.md` — Paper Note 页面的分析深度（方法详解、复现计划、约 1000 字）
+- `skills/digest_prompt.md` — Digest page style (daily commentary, quick takeaways, per-paper overview)
+- `skills/note_prompt.md` — Note page depth (method breakdown, reproduction plan, ~1000 words)
 
-直接编辑这两个 Markdown 文件即可。当前默认 prompt 以中英混合输出，面向机器人/具身智能方向。如果你的研究方向不同，建议修改 prompt 中的"目标读者"描述和领域相关段落。
+Edit these Markdown files directly. The default prompts produce mixed Chinese-English output tailored for robotics/embodied AI. To adapt for a different research area, update the "target reader" description and domain-specific sections in the prompts.
 
 ---
 
-## GitHub Actions 自动化
+## GitHub Actions
 
-项目自带 GitHub Actions 工作流，每天自动运行。
+The project includes a GitHub Actions workflow that runs automatically every day.
 
-### 配置步骤
+### Setup
 
-1. 将项目推送到 GitHub
-2. 进入仓库 **Settings → Secrets and variables → Actions → New repository secret**
-3. 添加以下 4 个 secret：
+1. Push the project to GitHub
+2. Go to **Settings → Secrets and variables → Actions → New repository secret**
+3. Add these 4 secrets:
 
-   | Secret 名 | 值 |
-   |-----------|---|
-   | `NOTION_API_KEY` | 你的 Notion integration token |
-   | `DIGEST_PARENT_PAGE_ID` | Digest 父页面 ID |
-   | `NOTES_DB_ID` | Paper Notes 数据库 ID |
+   | Secret Name | Value |
+   |-------------|-------|
+   | `NOTION_API_KEY` | Your Notion integration token |
+   | `DIGEST_PARENT_PAGE_ID` | Digest parent page ID |
+   | `NOTES_DB_ID` | Paper Notes database ID |
    | `ANTHROPIC_API_KEY` | Anthropic API key |
 
-### 自动运行
+### Automatic Schedule
 
-工作流每天 **太平洋时间 09:00**（UTC 17:00）自动执行。
+The workflow runs daily at **09:00 AM Pacific** (UTC 17:00).
 
-### 手动触发
+### Manual Trigger
 
-在 **Actions** 标签页 → 选择 **Daily Paper Digest** → 点击 **Run workflow**，可选参数：
+Go to the **Actions** tab → select **Daily Paper Digest** → click **Run workflow**, with optional inputs:
 
-- `date` — 指定日期（`YYYY-MM-DD` 格式，默认当天）
-- `top_k` — 论文数量（默认 5）
+- `date` — Digest date in `YYYY-MM-DD` format (defaults to today)
+- `top_k` — Number of top papers (defaults to 5)
 
 ---
 
-## 测试
+## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-当前覆盖：
-- `test_merger.py` — 去重逻辑（按 arXiv ID / 标题哈希）、字段合并（likes / keywords / abstract / published）、边界情况
-- `test_ranker.py` — 评分公式正确性、top-k 截取、自定义权重、边界情况
+Current coverage:
+- `test_merger.py` — Dedup logic (by arXiv ID / title hash), field merging (likes / keywords / abstract / published), edge cases
+- `test_ranker.py` — Scoring formula correctness, top-k selection, custom weights, edge cases
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 app/
-  __main__.py              # python -m app 入口
-  daily_digest.py          # CLI 参数解析 + 5 阶段 pipeline 编排
-  config.py                # 加载 config.yaml，支持 .env 环境变量覆盖
-  models.py                # PaperCandidate（论文候选）& PaperSummary（摘要结构）
+  __main__.py              # python -m app entrypoint
+  daily_digest.py          # CLI parsing + 5-stage pipeline orchestration
+  config.py                # Loads config.yaml + .env with env var overrides
+  models.py                # PaperCandidate & PaperSummary dataclasses
   providers/
-    arxiv_provider.py      # arXiv API 按关键词 + 时间窗口搜索
-    hf_provider.py         # HF Daily Papers JSON API + HTML 爬虫 fallback
+    arxiv_provider.py      # arXiv API keyword + time window search
+    hf_provider.py         # HF Daily Papers JSON API + HTML scraper fallback
   services/
-    merger.py              # 多来源合并 & 去重
-    ranker.py              # 打分公式 & 排序截取
-    summarizer.py          # Claude API 调用 + 结构化响应解析
-    notion_writer.py       # Notion API: upsert 页面 + block 构建
+    merger.py              # Multi-source merge & deduplication
+    ranker.py              # Scoring formula & top-k selection
+    summarizer.py          # Claude API calls + structured response parsing
+    notion_writer.py       # Notion API: upsert pages + block construction
 skills/
-  digest_prompt.md         # Digest 摘要的 system prompt
-  note_prompt.md           # Paper Note 详细分析的 system prompt
+  digest_prompt.md         # System prompt for digest summaries
+  note_prompt.md           # System prompt for detailed paper analysis
 tests/
-  test_merger.py           # 合并去重单元测试
-  test_ranker.py           # 评分排名单元测试
-config.yaml                # 关键词、搜索参数、排名权重配置
-.env.example               # 环境变量模板
+  test_merger.py           # Merge & dedup unit tests
+  test_ranker.py           # Scoring & ranking unit tests
+config.yaml                # Keywords, provider settings, ranking weights
+.env.example               # Environment variable template
 .github/workflows/
-  daily_digest.yml         # GitHub Actions 每日定时任务
+  daily_digest.yml         # Scheduled GitHub Actions workflow
 ```
 
-## 技术栈
+## Tech Stack
 
-| 组件 | 技术 | 说明 |
-|------|------|------|
-| 语言 | Python 3.11+ | — |
-| LLM | Anthropic Claude (`claude-sonnet-4-20250514`) | 论文摘要生成 |
-| 知识库 | Notion API (`notion-client`) | 结构化输出 & 长期沉淀 |
-| 学术搜索 | arXiv API (`arxiv` 包) | 全字段关键词搜索 |
-| 社区热度 | Hugging Face (`requests` + `beautifulsoup4`) | Daily Papers + likes |
-| 自动化 | GitHub Actions | 每日定时触发 |
-| 配置 | YAML + dotenv | 灵活的多层配置 |
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Language | Python 3.11+ | — |
+| LLM | Anthropic Claude (`claude-sonnet-4-20250514`) | Paper summarization |
+| Knowledge Base | Notion API (`notion-client`) | Structured output & long-term storage |
+| Academic Search | arXiv API (`arxiv` package) | Full-field keyword search |
+| Community Signal | Hugging Face (`requests` + `beautifulsoup4`) | Trending papers + like counts |
+| Automation | GitHub Actions | Daily scheduled runs |
+| Configuration | YAML + dotenv | Flexible multi-layer config |
 
 ## License
 
