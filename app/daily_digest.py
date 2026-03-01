@@ -54,6 +54,17 @@ def main(argv: list[str] | None = None) -> None:
         logger.warning("No papers found. Exiting.")
         return
 
+    # 2b) Filter out papers already in Notes DB
+    writer = NotionWriter()
+    existing_keys = writer.get_existing_keys()
+    before = len(all_papers)
+    all_papers = [p for p in all_papers if p.notion_key not in existing_keys]
+    logger.info("Filtered %d already-seen papers, %d remaining", before - len(all_papers), len(all_papers))
+
+    if not all_papers:
+        logger.warning("All papers already seen. Exiting.")
+        return
+
     # 3) Rank & select top-k
     weights = cfg["ranking"].get("weights")
     top_papers = rank_papers(all_papers, keywords, top_k=top_k, weights=weights)
@@ -79,7 +90,6 @@ def main(argv: list[str] | None = None) -> None:
         _print_digest(digest_markdown, top_papers)
         return
 
-    writer = NotionWriter()
     digest_id = writer.write_digest(top_papers, digest_date, digest_markdown)
     logger.info("Notion digest page: %s", digest_id)
 

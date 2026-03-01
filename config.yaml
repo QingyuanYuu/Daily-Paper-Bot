@@ -12,7 +12,7 @@ providers:
     trending_url: "https://huggingface.co/papers"
 
 ranking:
-  top_k: 5
+  top_k: 3
   weights:
     hf_likes: 0.6
     recency: 0.3

@@ -64,7 +64,7 @@ score = 0.6 × log(1 + hf_likes)      # Community engagement (log-scaled to prev
       + 0.1 × keyword_match_strength  # Keyword coverage (matched keywords / total keywords)
 ```
 
-Papers are sorted by score in descending order, and the top `top_k` are selected (default: 5, overridable via `TOP_K` in `.env`).
+Papers are sorted by score in descending order, and the top `top_k` are selected (default: 3, overridable via `TOP_K` in `.env`).
 
 **Multi-keyword matching**: A single paper can match multiple keywords. For example, a paper about humanoid + diffusion gets `keyword_match_strength = 2/4 = 0.5`, scoring higher than one matching only a single keyword (0.25). In practice, HF likes dominate the ranking; keyword match serves as a tiebreaker.
 
@@ -151,7 +151,7 @@ NOTES_DB_ID=your_paper_notes_database_id
 ANTHROPIC_API_KEY=sk-ant-your_anthropic_key
 
 # Optional — override config.yaml defaults
-# TOP_K=3                  # Number of top papers per day (default: 5)
+# TOP_K=3                  # Number of top papers per day (default: 3)
 # WINDOW_DAYS=7             # arXiv search window in days (default: 7)
 # KEYWORDS=humanoid,world model,diffusion   # Custom keywords (comma-separated)
 # TZ=America/Los_Angeles    # Timezone
@@ -202,7 +202,7 @@ Edit the `ranking.weights` section in `config.yaml`:
 
 ```yaml
 ranking:
-  top_k: 5
+  top_k: 3
   weights:
     hf_likes: 0.6       # Community engagement weight
     recency: 0.3         # Recency weight
@@ -256,7 +256,7 @@ The workflow runs daily at **09:00 AM Pacific** (UTC 17:00).
 Go to the **Actions** tab → select **Daily Paper Digest** → click **Run workflow**, with optional inputs:
 
 - `date` — Digest date in `YYYY-MM-DD` format (defaults to today)
-- `top_k` — Number of top papers (defaults to 5)
+- `top_k` — Number of top papers (defaults to 3)
 
 ---
 

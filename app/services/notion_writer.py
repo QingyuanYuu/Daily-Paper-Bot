@@ -124,6 +124,24 @@ class NotionWriter:
             logger.warning("Query by Key failed", exc_info=True)
         return None
 
+    def get_existing_keys(self) -> set[str]:
+        """Return all Key values already in the Notes DB (for cross-day dedup)."""
+        keys: set[str] = set()
+        start_cursor = None
+        while True:
+            body: dict = {"page_size": 100}
+            if start_cursor:
+                body["start_cursor"] = start_cursor
+            resp = self._query_database(self.notes_db, **body)
+            for page in resp["results"]:
+                rt = page.get("properties", {}).get("Key", {}).get("rich_text", [])
+                if rt:
+                    keys.add(rt[0]["text"]["content"])
+            if not resp.get("has_more"):
+                break
+            start_cursor = resp.get("next_cursor")
+        return keys
+
     def _query_database(self, database_id: str, **kwargs) -> dict:
         body = {k: v for k, v in kwargs.items()}
         return self.client.request(
