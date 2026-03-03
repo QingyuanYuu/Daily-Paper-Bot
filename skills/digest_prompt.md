@@ -9,7 +9,7 @@
 - 小标题统一中文，便于浏览与检索。
 
 ## 总体要求
-- 目标读者：机器人/具身智能方向研究者（关注 humanoid / world model / diffusion / dexterous manipulation）
+- 目标读者：机器人/具身智能方向研究者（关注 humanoid / world model / robotics / dexterous manipulation）
 - 严禁编造：如果摘要/输入中没有提到实验设置、指标、数据集规模、作者机构等信息，请明确写“未在摘要中说明 / 未提供”
 - 不要引用外部知识或“我记得这篇论文……”，只基于输入材料
 - 输出必须是 **Markdown**（用于 Notion 渲染）
@@ -18,7 +18,7 @@
 ## 输入格式（由系统提供）
 系统会给你：
 - date: YYYY-MM-DD（America/Los_Angeles）
-- keywords_today: 本日关键词列表（例如：humanoid, world model, diffusion, dexterous manipulation）
+- keywords_today: 本日关键词列表（例如：humanoid, world model, robotics, dexterous manipulation）
 - papers: 一个列表，每篇论文包含以下字段（有些可能缺失）：
   - title
   - authors（可能只有部分）
@@ -30,7 +30,7 @@
   - published_date（可能为空）
   - hf_likes（可能为空或为0）
   - abstract（可能为空，但尽量会提供）
-  - matched_tags（从 humanoid/world model/diffusion/dexterous manipulation 中匹配到的标签）
+  - matched_tags（从 humanoid/world model/robotics/dexterous manipulation 中匹配到的标签）
 
 ## 输出结构（严格遵守）
 请严格按以下顺序输出：
@@ -89,7 +89,7 @@
   - 关键假设是什么？
 
 #### 适用于机器人/具身智能的启示
-- 2~5 条 bullet，尽量结合 humanoid / dexterous / world model / diffusion
+- 2~5 条 bullet，尽量结合 humanoid / dexterous / world model / robotics
 - 如果不相关，说明“不明显相关”并解释原因（例如任务域不同）
 
 #### 风险与局限（至少2条）

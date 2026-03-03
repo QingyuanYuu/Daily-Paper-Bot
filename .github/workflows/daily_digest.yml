@@ -12,7 +12,7 @@ on:
       top_k:
         description: "Number of top papers"
         required: false
-        default: "5"
+        default: "3"
 
 jobs:
   digest:
@@ -33,6 +33,10 @@ jobs:
           DIGEST_PARENT_PAGE_ID: ${{ secrets.DIGEST_PARENT_PAGE_ID }}
           NOTES_DB_ID: ${{ secrets.NOTES_DB_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TOP_K: ${{ secrets.TOP_K || '3' }}
+          KEYWORDS: ${{ secrets.KEYWORDS || '' }}
+          WINDOW_DAYS: ${{ secrets.WINDOW_DAYS || '7' }}
+          TZ: America/Los_Angeles
         run: |
           DATE_ARG=""
           TOP_K_ARG=""

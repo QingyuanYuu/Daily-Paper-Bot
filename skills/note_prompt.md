@@ -24,7 +24,7 @@
 - url_arxiv / url_pdf / url_hf（可能为空）
 - published_date（可能为空）
 - hf_likes（可能为空）
-- matched_tags（humanoid/world model/diffusion/dexterous manipulation）
+- matched_tags（humanoid/world model/robotics/dexterous manipulation）
 - abstract（尽量提供）
 - optional_context（可能提供：关键段落、方法概述、或你已有笔记片段）
 
@@ -85,7 +85,7 @@
 - 3~6 条 bullet
 - 从这些角度写：数据/传感器依赖、计算成本/实时性、泛化范围、评测缺口（证据不足）
 
-## 与我的方向的关联（humanoid / world model / diffusion / dexterous）
+## 与我的方向的关联（humanoid / world model / robotics / dexterous）
 - 4~8 条 bullet
 - 尽可能给出“怎么用到我的系统里”的具体接口思路（例如：world model 用作 planning prior、diffusion action generator 接入控制栈、dexterous 的动作表示、humanoid 的全身约束 WBC/contact 等）
 
